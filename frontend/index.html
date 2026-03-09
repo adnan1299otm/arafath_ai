@@ -424,6 +424,9 @@
   function addAiMsg() {
     removeWelcome();
     const msgs = document.getElementById('messages');
+    // Remove any previous streaming id to prevent conflicts
+    const prev = document.getElementById('ai-stream-msg');
+    if (prev) prev.removeAttribute('id');
     const d = document.createElement('div');
     d.id = 'ai-stream-msg';
     d.className = 'msg-anim';
@@ -434,15 +437,17 @@
       </div>
       <div style="max-width:80%;">
         <div style="font-size:11px; color:#a855f7; margin-bottom:4px; font-family:monospace; font-weight:600;">Arafath AI</div>
-        <div id="stream-content" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px 16px 16px 16px; padding:12px 16px; font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-word;">
+        <div data-sc style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px 16px 16px 16px; padding:12px 16px; font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-word;">
           <div style="display:flex; gap:5px; align-items:center; padding:2px 0;">
             <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
           </div>
         </div>
       </div>`;
+    const uid = 'sc-' + Date.now();
+    d.querySelector('[data-sc]').id = uid;
     msgs.appendChild(d);
     msgs.scrollTop = 99999;
-    return document.getElementById('stream-content');
+    return document.getElementById(uid);
   }
 
   async function sendMessage() {
@@ -470,16 +475,25 @@
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const lines = decoder.decode(value).split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line
+
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
           try {
-            const data = JSON.parse(line.slice(6));
-            if (data.error) { contentEl.textContent = '⚠️ ' + data.error; break; }
+            const data = JSON.parse(raw);
+            if (data.error) {
+              contentEl.textContent = '⚠️ ' + data.error;
+              break;
+            }
             if (data.text) {
               if (firstChunk) { contentEl.innerHTML = ''; firstChunk = false; }
               streamedText += data.text;
@@ -488,10 +502,17 @@
             }
             if (data.done) {
               contentEl.innerHTML = renderMarkdown(streamedText);
-              document.getElementById('ai-stream-msg').removeAttribute('id');
+              const msgEl = document.getElementById('ai-stream-msg');
+              if (msgEl) msgEl.removeAttribute('id');
             }
           } catch(e) {}
         }
+      }
+      // Final cleanup in case done event was missed
+      if (streamedText) {
+        contentEl.innerHTML = renderMarkdown(streamedText);
+        const msgEl = document.getElementById('ai-stream-msg');
+        if (msgEl) msgEl.removeAttribute('id');
       }
     } catch(err) {
       contentEl.textContent = '⚠️ Something went wrong. Please try again.';
@@ -500,6 +521,89 @@
       document.getElementById('send-btn').disabled = false;
       input.focus();
     }
+  }
+
+  // ── Mobile Sidebar ────────────────────────────────────
+  function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('overlay');
+    if (sidebar.classList.contains('open')) {
+      sidebar.classList.remove('open');
+      overlay.classList.remove('show');
+    } else {
+      sidebar.classList.add('open');
+      overlay.classList.add('show');
+    }
+  }
+  function closeSidebar() {
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('overlay').classList.remove('show');
+  }
+
+  // ── Voice to Text ─────────────────────────────────────
+  let recognition = null;
+  let isRecording = false;
+
+  function toggleVoice() {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      alert('Voice input is not supported. Please use Chrome.');
+      return;
+    }
+    if (isRecording) { stopVoice(); } else { startVoice(); }
+  }
+
+  function startVoice() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.lang = 'bn-BD';
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    const micBtn = document.getElementById('mic-btn');
+    const micIcon = document.getElementById('mic-icon');
+    const input = document.getElementById('msg-input');
+
+    recognition.onstart = () => {
+      isRecording = true;
+      micBtn.style.background = 'rgba(239,68,68,0.15)';
+      micBtn.style.borderColor = 'rgba(239,68,68,0.5)';
+      micIcon.style.color = '#ef4444';
+      input.placeholder = '🎤 Listening...';
+    };
+
+    recognition.onresult = (e) => {
+      let transcript = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        transcript += e.results[i][0].transcript;
+      }
+      input.value = transcript;
+      autoResize(input);
+    };
+
+    recognition.onend = () => {
+      stopVoice();
+      const text = input.value.trim();
+      if (text) sendMessage();
+    };
+
+    recognition.onerror = (e) => {
+      stopVoice();
+      if (e.error === 'not-allowed') alert('Microphone permission denied.');
+    };
+
+    recognition.start();
+  }
+
+  function stopVoice() {
+    isRecording = false;
+    const micBtn = document.getElementById('mic-btn');
+    const micIcon = document.getElementById('mic-icon');
+    const input = document.getElementById('msg-input');
+    micBtn.style.background = 'rgba(255,255,255,0.06)';
+    micBtn.style.borderColor = 'rgba(255,255,255,0.12)';
+    micIcon.style.color = '#94a3b8';
+    input.placeholder = 'Ask anything about Arafath... (English or বাংলা)';
+    if (recognition) { try { recognition.stop(); } catch(e) {} recognition = null; }
   }
 </script>
 </body>
