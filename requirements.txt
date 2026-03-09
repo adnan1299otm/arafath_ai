@@ -3,4 +3,4 @@ uvicorn
 python-dotenv
 supabase
 pydantic
-google-generativeai
+google-genai
