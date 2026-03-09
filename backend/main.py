@@ -2,7 +2,8 @@ import os
 import itertools
 import json
 import asyncio
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -112,45 +113,41 @@ def get_history(session_id: str) -> list:
 
 # ── Gemini Streaming ──────────────────────────────────────
 async def gemini_stream(history: list, user_message: str, session_id: str):
+    full_reply = ""
     try:
-        # Rotate API key
-        genai.configure(api_key=get_next_key())
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=SYSTEM_PROMPT
-        )
+        client = genai.Client(api_key=get_next_key())
 
-        # Build chat history for context
-        chat_history = []
+        contents = []
         for msg in history:
             role = "user" if msg["role"] == "user" else "model"
-            chat_history.append({"role": role, "parts": [msg["content"]]})
+            contents.append(
+                types.Content(role=role, parts=[types.Part(text=msg["content"])])
+            )
+        contents.append(
+            types.Content(role="user", parts=[types.Part(text=user_message)])
+        )
 
-        # Start chat with history
-        chat = model.start_chat(history=chat_history)
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.7,
+            max_output_tokens=1024,
+        )
 
-        full_reply = ""
-
-        # Run streaming in thread (SDK is sync)
-        def stream_sync():
-            return chat.send_message(user_message, stream=True)
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, stream_sync)
-
-        # Yield each chunk
-        for chunk in response:
+        # client.aio = async interface for true non-blocking streaming
+        async for chunk in await client.aio.models.generate_content_stream(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=config,
+        ):
             if chunk.text:
                 full_reply += chunk.text
                 yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-                await asyncio.sleep(0)
 
     except Exception as e:
         print(f"Gemini error: {e}")
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         return
 
-    # Save to Supabase after full response
     save_message(session_id, "user", user_message)
     save_message(session_id, "assistant", full_reply)
     yield f"data: {json.dumps({'done': True})}\n\n"
@@ -181,5 +178,9 @@ async def clear_history(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Serve frontend
-app.mount("/", StaticFiles(directory="../frontend", html=True), name="frontend")
+# ── Serve Frontend ────────────────────────────────────────
+# Works both locally and on Render
+import pathlib
+BASE_DIR = pathlib.Path(__file__).parent.parent
+frontend_dir = BASE_DIR / "frontend"
+app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
